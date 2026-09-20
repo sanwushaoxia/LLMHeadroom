@@ -1,0 +1,18 @@
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 日志文件(原始输入 / 过滤输出 / 压缩输出)
+*.log
+*.log.*
+
+# Headroom 本地数据
+.headroom/
