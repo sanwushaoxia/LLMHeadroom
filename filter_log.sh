@@ -89,5 +89,5 @@ if [[ -s "$output" ]]; then
     fi
 fi
 
-echo "共筛选出 $count 行，已写入 $output"
+echo "共筛选出 $count 行，已写入 $output" >&2
 exit 0

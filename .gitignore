@@ -1,18 +1,27 @@
 # Python 缓存与构建产物
 __pycache__/
-*.py[cod]
+# *.py[cod]
 .pytest_cache/
-*.egg-info/
-build/
-dist/
+# *.egg-info/
+# build/
+# dist/
 
 # 虚拟环境
-.venv/
-venv/
+# .venv/
+# venv/
 
 # 日志文件(原始输入 / 过滤输出 / 压缩输出)
 *.log
 *.log.*
+*.txt
 
 # Headroom 本地数据
-.headroom/
+# .headroom/
+# *.db
+# *.db-shm
+# *.db-wal
+
+# 测试与静态检查
+# .ruff_cache/
+# .coverage
+# htmlcov/

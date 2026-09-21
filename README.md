@@ -1,58 +1,72 @@
 # Headroom
 
-通用上下文压缩层:多种专用压缩器 + ContentRouter 自动路由 + CCR(压缩后可按需取回原文)。
-面向 AI Agent 场景(故障排查、日志分析、长 JSON/代码上下文),显著降低 token 消耗,同时**不丢失信息**——LLM 随时可凭标记取回原文。
+Headroom 是一个面向 AI Agent 的上下文压缩层：通过 `ContentRouter` 自动选择日志、JSON、Python 代码或纯文本压缩器，并将压缩结果与 CCR（Context Compression with Retrieval）原文存档绑定。
+
+压缩是可回溯的：结果可能带有 `[headroom:ccr://<id>]` 标记，Agent 可以调用 `headroom_retrieve` 分页取回完整 UTF-8 原文。CCR 原文使用 SQLite + zlib 存储，带 TTL、SHA-256 完整性校验、WAL 并发支持和容量限制。
 
 ## 核心机制
 
-```
-原始内容 ──► ContentRouter(按置信度自动选路)
-                │
-                ├─ LogCompressor    重复行折叠 / 堆栈裁剪 / 低级别过滤
-                ├─ JsonCompressor   长数组首尾采样 / 同构列表 schema 提炼
-                ├─ CodeCompressor   函数体折叠 / import 合并
-                └─ TextCompressor   兜底:重复行 / 空白规整
-                        │
-                        ▼
-        压缩结果 + CCR 标记 ──► SQLite 存储(zlib, TTL 72h)
-                        │
-                        ▼
-     LLM 调用 headroom_retrieve(ccr_id) ──► 取回完整原文
-```
-
-**CCR (Context Compression with Retrieval)** 是 Headroom 的核心差异:压缩不是单向摘要,而是"按需查阅"。压缩结果首行附带标记:
-
-```
-[headroom:ccr://d40fb722|orig=330846B|saved=89%] 原文已压缩存档,可调用 headroom_retrieve(ccr_id="d40fb722") 取回完整原文。
+```text
+原始内容
+   │
+   ▼
+ContentRouter(hint 优先，否则 detect 置信度择优)
+   ├── LogCompressor    重复模板 / 堆栈 / 低级别日志
+   ├── JsonCompressor   长数组采样 / 同构列表 schema / 深度限制
+   ├── CodeCompressor   Python 函数体折叠 / 安全 import 处理
+   └── TextCompressor   重复行 / 空白规整兜底
+   │
+   ▼
+压缩正文 + CCR marker ──► SQLite(zlib, TTL, SHA-256)
+   │
+   ▼
+headroom_retrieve(ccr_id, offset, limit) ──► 原文分页取回
 ```
 
-LLM 看到标记后,任何时刻都可以取回原文,不用担心摘要丢失关键细节。
-
-实测(本仓库 `examples/demo.py`,4000 行合成故障排查日志):**节省 89.6% token,取回内容与原文逐字节一致**。实际节省比例取决于输入形态。
+所有容量和 `*_bytes` 统计使用 UTF-8 字节数；token 数是 `len/4` 启发式，只用于相对比较，不是精确计费值。
 
 ## 安装
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .
-
-# 激活虚拟环境后即可直接使用 headroom 命令
-source .venv/bin/activate
-headroom compress app.log
-
-# 或者不激活，直接调用
-.venv/bin/headroom compress app.log
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest
 ```
 
-> 提示：若在 conda 环境下（如 base）使用，务必先 `source .venv/bin/activate` 再运行 `headroom`——conda base 中没有安装该命令，否则会报 `headroom: command not found`。
+### 激活虚拟环境
 
-## 作为 MCP Server 接入 Claude Code / Cursor
+在项目根目录执行：
 
 ```bash
-# Claude Code
-claude mcp add headroom -- /path/to/.venv/bin/python -m headroom.mcp_server
+cd /home/wyh/Automation/Headroom
+source .venv/bin/activate
 
-# Cursor(mcp.json)
+# 激活后可以直接使用 python、pip 和 headroom
+python -m pytest
+headroom --version
+```
+
+完成后退出虚拟环境：
+
+```bash
+deactivate
+```
+
+不想激活时，也可以始终使用 `.venv/bin/python`、`.venv/bin/pip` 和 `.venv/bin/headroom`。
+
+当前已验证 MCP SDK 2.x，依赖范围为 `mcp>=2.1,<3`。
+
+## MCP Server
+
+### Claude Code
+
+```bash
+claude mcp add headroom -- /path/to/.venv/bin/python -m headroom.mcp_server
+```
+
+### Cursor
+
+```json
 {
   "mcpServers": {
     "headroom": {
@@ -63,13 +77,105 @@ claude mcp add headroom -- /path/to/.venv/bin/python -m headroom.mcp_server
 }
 ```
 
-提供 3 个工具:
+### ZCode
 
-| 工具 | 说明 |
-|---|---|
-| `headroom_compress(content, hint?)` | 压缩长内容,自动路由;结果带 CCR 标记 |
-| `headroom_retrieve(ccr_id, mode?)` | 按需取回原文(`full` / `preview`) |
-| `headroom_stats()` | 压缩统计与 CCR 库存 |
+本项目提供 workspace 级 MCP 配置，文件位置为 `.zcode/config.json`。这样打开该项目时，ZCode 会自动连接 Headroom MCP；配置内容如下：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "headroom": {
+        "type": "stdio",
+        "command": "/home/wyh/Automation/Headroom/.venv/bin/python",
+        "args": ["-m", "headroom.mcp_server"],
+        "enabled": true,
+        "timeoutMs": 60000
+      }
+    }
+  }
+}
+```
+
+如果项目路径不同，把 `command` 改为项目实际路径下的 `.venv/bin/python`。也可以在 ZCode 的 **Settings → MCP** 中添加同样的 stdio server。workspace 配置只对本项目生效；如果要对所有项目生效，将相同配置放到 `~/.zcode/cli/config.json` 的 `mcp.servers` 下。
+
+验证 MCP 是否启动：
+
+```bash
+cd /home/wyh/Automation/Headroom
+source .venv/bin/activate
+python examples/e2e_mcp_check.py
+```
+
+
+
+#### `headroom_compress(content, hint?)`
+
+返回 JSON envelope：
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "text": "[headroom:ccr://...] ...",
+  "compressor": "log",
+  "ccr_id": "完整 32 位 hex id 或 null",
+  "retrievable": true,
+  "original_bytes": 14399,
+  "compressed_bytes": 600,
+  "emitted_bytes": 620,
+  "saved_ratio": 0.956,
+  "lossy": true,
+  "omissions": [],
+  "warnings": []
+}
+```
+
+`hint` 可选：`log`、`json`、`code`、`text`。未知 hint 返回 `UNKNOWN_HINT`。
+
+#### `headroom_retrieve(ccr_id, mode, offset, limit)`
+
+`mode` 支持 `full`、`preview`、`chunk`。大内容建议使用 `chunk`：
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "ccr_id": "...",
+  "content": "原文片段",
+  "offset": 0,
+  "limit": 20000,
+  "total_chars": 14399,
+  "total_bytes": 14399,
+  "next_offset": 20000,
+  "has_more": true,
+  "content_hash": "sha256..."
+}
+```
+
+`offset` 和 `limit` 使用 Unicode 字符位置；`content_hash` 是完整原文 UTF-8 bytes 的 SHA-256。
+
+#### `headroom_stats()`
+
+返回 SQLite 数据库范围内的持久化累计统计，以及当前未过期 CCR 库存。新进程和 CLI 都能读取同一累计统计。
+
+### 错误 envelope
+
+错误不会再用自然语言字符串表示：
+
+```json
+{
+  "schema_version": 1,
+  "ok": false,
+  "error": {
+    "code": "CCR_NOT_FOUND",
+    "message": "CCR entry not found",
+    "details": {"ccr_id": "..."}
+  }
+}
+```
+
+常见错误码：`CONTENT_TOO_LARGE`、`CCR_NOT_FOUND`、`CCR_INTEGRITY_ERROR`、`INVALID_MODE`、`UNKNOWN_HINT`、`STORE_CAPACITY_EXCEEDED`、`CONFIG_ERROR`。
 
 ## Python API
 
@@ -77,69 +183,187 @@ claude mcp add headroom -- /path/to/.venv/bin/python -m headroom.mcp_server
 from headroom.core.pipeline import Headroom
 
 hr = Headroom()
-result = hr.compress(big_log_text)
-print(result.text)                # 压缩结果(首行带 CCR 标记)
-print(result.stats.saved_ratio)   # 节省比例
-print(hr.retrieve(result.stats.ccr_id))  # 取回原文(与输入逐字节一致)
+try:
+    result = hr.compress(big_log_text, hint="log")
+    print(result.text)
+    print(result.stats.as_dict())
+
+    if result.stats.ccr_id:
+        page = hr.retrieve_page(result.stats.ccr_id, offset=0, limit=20_000)
+        print(page.content)
+finally:
+    hr.close()
 ```
 
-扩展自定义压缩器:
+超过 `HEADROOM_MAX_CONTENT` 的输入会抛 `ContentTooLargeError`，不会静默截断。CCR 取回会校验原文 byte length 和 SHA-256；数据库 payload 损坏时抛 `CCRIntegrityError`。
 
-```python
-from headroom.compressors.base import Compressor
-from headroom.core.pipeline import Headroom
+## 日志筛选脚本
 
-class MyCompressor(Compressor):
-    name = "my"
-    def detect(self, content): return 0.9 if "<csv>" in content else 0.0
-    def compress(self, content): return content[:1000] + "…"
+项目根目录提供两个轻量日志筛选工具：
 
-hr = Headroom()
-hr.router.register(MyCompressor())   # 插入到 text 兜底之前
+- [`filter_log.sh`](./filter_log.sh)：使用系统 `grep`，适合快速筛选大文件。
+- [`filter_log.py`](./filter_log.py)：Python 实现，支持 `--encoding`，适合跨平台或需要在脚本中复用。
+
+### Shell 版本
+
+```bash
+# 激活虚拟环境不是必须的；该脚本只依赖 bash 和 grep
+./filter_log.sh input/app.log ERROR
+
+# 指定输出文件
+./filter_log.sh input/app.log ERROR output/error.log
+
+# 忽略大小写，或反向筛选不包含 ERROR 的行
+./filter_log.sh -i input/app.log error output/error.log
+./filter_log.sh -v input/app.log DEBUG output/non_debug.log
 ```
+
+不指定输出文件时，输出为输入文件同目录下的 `<文件名>.filtered.log`。关键字按固定字符串匹配，不是正则表达式；关键字以 `-` 开头时也可以正常使用。
+
+### Python 版本
+
+```bash
+# 激活环境后
+python filter_log.py input/app.log ERROR output/error.log
+python filter_log.py input/app.log error output/error.log --ignore-case
+python filter_log.py input/app.log DEBUG output/non_debug.log --invert
+
+# 不激活环境时
+.venv/bin/python filter_log.py input/app.log ERROR output/error.log
+```
+
+Python 版本也支持短参数 `-i`/`-v`，并可以指定输入编码：
+
+```bash
+python filter_log.py input/app.log ERROR output/error.log --encoding gb18030
+```
+
+### 与 Headroom 联用
+
+先筛掉无关日志，再让 Headroom 自动压缩：
+
+```bash
+mkdir -p output
+./filter_log.sh input/app.log ERROR output/error.log
+headroom compress output/error.log --hint log --json > output/error.compressed.json
+```
+
+也可以直接把筛选结果通过 stdin 交给 Headroom：
+
+```bash
+./filter_log.sh input/app.log ERROR | headroom compress - --hint log
+```
+
+`filter_log.sh` 会输出统计信息到 stderr，因此可以安全地把筛选后的日志通过 stdout 管道给 Headroom。
 
 ## CLI
 
 ```bash
-headroom compress app.log     # 压缩文件(- 为 stdin)
-headroom retrieve d40fb722    # 按 CCR id 取回原文
-headroom stats                # 查看统计
-headroom mcp                  # 启动 MCP server(stdio)
+# 人类可读输出
+headroom compress app.log --hint log
+headroom compress app.log --encoding latin-1 --hint log
+headroom compress large.log --max-content 10485760 --hint log
+headroom retrieve <ccr_id> --offset 0 --limit 20000
+headroom stats
+headroom mcp
+
+# 稳定 JSON 输出
+headroom compress app.log --json
+headroom retrieve <ccr_id> --offset 0 --limit 1000 --json
+headroom stats --json
 ```
 
-## 配置(环境变量)
+CLI 默认严格按 UTF-8 读取输入。若日志来自单字节编码或包含无法按 UTF-8 解码的历史字节，可显式指定编码，例如：
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `HEADROOM_DB` | `~/.headroom/ccr.db` | CCR 存储路径 |
-| `HEADROOM_TTL_HOURS` | `72` | 原文存档存活时间 |
-| `HEADROOM_MIN_RATIO` | `0.3` | 触发 CCR 的最低节省比例 |
-| `HEADROOM_MAX_CONTENT` | `2097152` | 单次输入最大字节数 |
-
-## 项目结构
-
+```bash
+headroom compress output/workflow.log --encoding latin-1 --hint log
 ```
-headroom/
-├── core/
-│   ├── models.py      # Config / CompressResult / Stats / token 估算
-│   ├── router.py      # ContentRouter:按 detect() 置信度择优
-│   └── pipeline.py    # Headroom 门面:compress / retrieve / stats
-├── compressors/       # log / json / code / text(兜底)
-├── ccr/               # SQLiteStore(zlib+TTL)/ marker 嵌入与解析
-├── integrations/      # MCP server(stdio)
-└── cli.py             # compress / retrieve / stats / mcp
+
+### CLI 配置文件
+
+不想每次输入 `--encoding`、`--max-content`、`--hint` 时，可把压缩默认值保存到 `~/.headroom/config.json`：
+
+```json
+{
+  "encoding": "latin-1",
+  "max_content": 10485760,
+  "hint": "log"
+}
 ```
+
+之后命令即可简化为：
+
+```bash
+headroom compress output/workflow.log > output/workflow.compressed.log
+```
+
+配置文件规则：
+
+- 路径优先级：`compress --config PATH` > `HEADROOM_CONFIG` > `~/.headroom/config.json`。
+- `~/.headroom/config.json` 不存在时，若项目仓库根目录有 `config.json`（见本项目根目录的备份模板），会自动使用它并另存一份到 `~/.headroom/`。
+- 参数优先级：CLI 显式参数 > `HEADROOM_MAX_CONTENT` 环境变量 > JSON `max_content` > 内置 `2 MiB`；`encoding` 和 `hint` 只由 CLI 参数与 JSON 控制。
+- 只接受 `encoding`（合法 codec 名）、`max_content`（正整数）、`hint`（`log`/`json`/`code`/`text` 或 `null`）；坏 JSON、未知字段或非法值返回 `CONFIG_ERROR`。
+- 项目仓库的 `config.json` 是 CLI 压缩默认值模板；`.zcode/config.json` 是 ZCode MCP 配置，两者用途不同，不要混用。
+- 团队共享配置可提交一份 JSON，并显式指定：`headroom compress --config ./headroom-config.json app.log`。
+- `max_content` 按解码后文本的 UTF-8 bytes 计算；`latin-1` 会把每个 0–255 字节映射成一个字符，适合编码未知但必须完成筛选/压缩的历史日志。若知道真实编码，优先用 `gb18030`、`cp1252` 等。
+
+默认 UTF-8 解码失败时，CLI 返回 `INPUT_DECODE_ERROR`，不会静默替换坏字节。
+
+
+`--max-content` 只对本次 CLI 调用生效，例如处理 6.8 MB 日志：
+
+```bash
+headroom compress output/workflow.log \
+  --encoding latin-1 \
+  --max-content 10485760 \
+  --hint log \
+  > output/workflow.compressed.log
+```
+
+## 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---:|---|
+| `HEADROOM_DB` | `~/.headroom/ccr.db` | SQLite 路径 |
+| `HEADROOM_TTL_HOURS` | `72` | CCR TTL |
+| `HEADROOM_MIN_RATIO` | `0.3` | 触发 CCR 的最低正文节省比例 |
+| `HEADROOM_MAX_CONTENT` | `2097152` | 单次输入最大 UTF-8 bytes，超限拒绝 |
+| `HEADROOM_MAX_STORE_BYTES` | `268435456` | CCR 压缩 payload 逻辑总容量 |
+| `HEADROOM_MAX_STORE_ENTRIES` | `10000` | CCR 最大活跃条目数 |
+| `HEADROOM_RETRIEVE_DEFAULT_LIMIT` | `20000` | 默认分页大小 |
+| `HEADROOM_CONFIG` | 无 | 覆盖 CLI 配置文件路径 |
+
+容量上限只针对 SQLite 中压缩 BLOB 的逻辑大小，不等同 `.db`、`.db-wal` 和 `.db-shm` 的物理文件大小。
+
+## 压缩器与 loss metadata
+
+压缩器保留兼容的 `compress() -> str`，并支持 `compress_with_metadata()` 返回 `CompressionOutput`：
+
+- `lossy`：是否省略/变换内容
+- `omissions`：类型、路径/行号、数量和原因
+- `language`：`log`、`json`、`python` 或 `text`
+
+首版代码压缩器只承诺 Python，并确保折叠后可通过 `ast.parse`。JSON 输出使用 `_headroom` envelope，避免把元数据混入用户对象字段；JSON 采样、空字段删除和深度截断都会记录 metadata。
 
 ## 测试与演示
 
 ```bash
-.venv/bin/python -m pytest          # 52 个测试
-.venv/bin/python examples/demo.py   # 故障排查场景演示
+.venv/bin/python -m pytest
+.venv/bin/python examples/demo.py
+.venv/bin/python examples/e2e_mcp_check.py
 ```
 
-## 设计取舍与边界
+测试覆盖 UTF-8/超限、Config 校验、TTL、持久统计、SQLite hash/容量/并发、marker、分页 MCP、CLI JSON、日志/JSON/Python/文本压缩边界。
 
-- 首版压缩算法为**规则式**(确定性、可测试、零额外依赖);语义/embedding 类压缩未包含,可通过 `router.register()` 扩展。
-- token 估算采用 `len/4` 启发式,未引入 tokenizer 依赖;数字用于相对比较,非精确计费。
-- HTTP Proxy / Agent Wrap(hooks)集成模式、中文压缩模型不在首版范围,架构上已预留扩展点。
-- CCR 存档默认 72 小时后过期,过期后 `headroom_retrieve` 返回明确提示(不可恢复)。
+## 项目结构
+
+```text
+headroom/
+├── core/          # errors / models / router / pipeline
+├── compressors/   # log / json / code(Python) / text
+├── ccr/           # SQLiteStore / marker
+├── integrations/  # MCP Server
+└── cli.py
+```
+
+HTTP Proxy、Agent Hooks、embedding 语义压缩和中文专用模型仍属于后续扩展范围；当前可通过 `router.register()` 添加自定义压缩器。

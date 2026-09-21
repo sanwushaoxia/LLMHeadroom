@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "headroom": {
+        "type": "stdio",
+        "command": "/home/wyh/Automation/Headroom/.venv/bin/python",
+        "args": ["-m", "headroom.mcp_server"],
+        "enabled": true,
+        "timeoutMs": 60000
+      }
+    }
+  }
+}

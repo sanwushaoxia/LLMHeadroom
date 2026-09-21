@@ -1,10 +1,10 @@
 """端到端验收:真实 stdio 子进程 + 官方 MCP client 会话。
 
-流程:spawn `python -m headroom.mcp_server` → initialize → tools/list →
-headroom_compress → headroom_retrieve → 校验取回内容与原文逐字节一致。
+验证 initialize、tools/list、结构化 compress、分页 retrieve、stats 和完整拼接。
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -24,7 +24,7 @@ async def run() -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            names = {t.name for t in tools.tools}
+            names = {tool.name for tool in tools.tools}
             assert names == {"headroom_compress", "headroom_retrieve", "headroom_stats"}, names
             print("tools:", sorted(names))
 
@@ -32,18 +32,33 @@ async def run() -> None:
                 f"2024-01-01 00:{i // 60:02d}:{i % 60:02d} DEBUG healthcheck ok node-{i % 5}"
                 for i in range(300)
             )
-            comp = await session.call_tool("headroom_compress", {"content": big})
-            text = comp.content[0].text
-            assert "ccr://" in text, text
-            cid = text.split("ccr://")[1][:8]
-            print("compress marker:", text.splitlines()[0][:58])
+            comp_result = await session.call_tool("headroom_compress", {"content": big})
+            comp = json.loads(comp_result.content[0].text)
+            assert comp["ok"] is True
+            assert "ccr://" in comp["text"]
+            cid = comp["ccr_id"]
+            print("compress marker:", comp["text"].splitlines()[0][:58])
 
-            ret = await session.call_tool("headroom_retrieve", {"ccr_id": cid})
-            assert ret.content[0].text == big, "E2E roundtrip mismatch!"
-            print(f"E2E roundtrip OK: {len(big)} chars identical")
+            pieces: list[str] = []
+            offset = 0
+            while True:
+                ret_result = await session.call_tool(
+                    "headroom_retrieve",
+                    {"ccr_id": cid, "mode": "chunk", "offset": offset, "limit": 100},
+                )
+                page = json.loads(ret_result.content[0].text)
+                assert page["ok"] is True
+                pieces.append(page["content"])
+                if not page["has_more"]:
+                    break
+                offset = page["next_offset"]
+            assert "".join(pieces) == big, "E2E paginated roundtrip mismatch!"
+            print(f"E2E paginated roundtrip OK: {len(big)} chars identical")
 
-            st = await session.call_tool("headroom_stats", {})
-            print(st.content[0].text)
+            stats_result = await session.call_tool("headroom_stats", {})
+            stats = json.loads(stats_result.content[0].text)
+            assert stats["ok"] is True and stats["calls"] == 1
+            print("stats:", stats["calls"], "call(s)")
     print("stdio E2E PASS")
 
 

@@ -1,40 +1,90 @@
-"""纯文本兜底压缩器:空白规整 + 连续重复行折叠。"""
+"""纯文本兜底压缩器:保守处理空白和连续重复行。"""
 
 from __future__ import annotations
 
 import re
 
-from headroom.compressors.base import Compressor
+from headroom.compressors.base import CompressionOutput, Compressor, Omission
 
 _TRAIL_WS = re.compile(r"[ \t]+$")
-_EXCESS_BLANK = re.compile(r"\n{3,}")
 
 
 class TextCompressor(Compressor):
     name = "text"
 
     def detect(self, content: str) -> float:
-        # 兜底压缩器:置信度恒为 0.1,只有在没有更高分压缩器时被选中。
         return 0.1
 
-    def compress(self, content: str) -> str:
+    def compress_with_metadata(self, content: str) -> CompressionOutput:
+        lines = content.splitlines(keepends=False)
         out: list[str] = []
+        omissions: list[Omission] = []
         prev: str | None = None
-        run = 1  # 当前行与前一段中相同行的连续出现次数
-        for raw in content.splitlines():
+        run_start = 0
+        run = 0
+        whitespace_changed = False
+
+        def flush() -> None:
+            nonlocal run, prev, run_start
+            if prev is None:
+                return
+            if run >= 2:
+                out.append(prev + f"  [×{run} 次重复]")
+                omissions.append(
+                    Omission(
+                        kind="repeated_lines",
+                        reason=f"collapsed {run} repeated lines",
+                        start=run_start,
+                        end=run_start + run,
+                        count=run - 1,
+                    )
+                )
+            elif prev == "":
+                # 空行永远按空白处理，不生成重复行提示。
+                if not out or out[-1] != "":
+                    out.append("")
+            else:
+                out.append(prev)
+            run = 0
+            prev = None
+
+        for index, raw in enumerate(lines):
             line = _TRAIL_WS.sub("", raw)
-            if line == prev:
-                run += 1
+            whitespace_changed |= line != raw
+            if line == "":
+                flush()
+                if out and out[-1] == "":
+                    omissions.append(
+                        Omission(
+                            kind="blank_lines",
+                            reason="collapsed consecutive blank lines",
+                            start=index,
+                            end=index + 1,
+                            count=1,
+                        )
+                    )
+                    continue
+                out.append("")
                 continue
-            if prev is not None and run >= 2:
-                out[-1] = prev + f"  [×{run} 次重复]"
-            if not line.strip() and out and not out[-1].strip():
-                continue  # 折叠连续空行
-            out.append(line)
-            prev = line
-            run = 1
-        if prev is not None and run >= 2:
-            out[-1] = prev + f"  [×{run} 次重复]"
+            if prev is None:
+                prev, run_start, run = line, index, 1
+            elif line == prev:
+                run += 1
+            else:
+                flush()
+                prev, run_start, run = line, index, 1
+        flush()
+
+        # 保持正文内容，不再无条件 strip 首尾换行。
         text = "\n".join(out)
-        text = _EXCESS_BLANK.sub("\n\n", text)
-        return text.strip("\n")
+        if whitespace_changed:
+            omissions.append(Omission(kind="whitespace", reason="trimmed trailing spaces"))
+        return CompressionOutput(
+            text=text,
+            lossy=bool(omissions),
+            omissions=tuple(omissions),
+            language="text",
+        )
+
+    def compress(self, content: str) -> str:
+        return self.compress_with_metadata(content).text

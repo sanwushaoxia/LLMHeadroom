@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: headroom
+Version: 0.1.0
+Summary: Headroom — 通用上下文压缩层:专用压缩器 + ContentRouter 自动路由 + CCR 按需取回
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: mcp>=1.2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

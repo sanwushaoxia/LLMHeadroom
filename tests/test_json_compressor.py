@@ -26,18 +26,17 @@ def test_detect_rejects_non_json():
 def test_long_array_sampled_head_tail():
     out = JsonCompressor(sample_items=3).compress(BIG_LIST)
     data = json.loads(out)
-    items = [x for x in data if isinstance(x, dict) and "_index" not in x and "_headroom_" not in x]
     assert len([x for x in data if isinstance(x, dict) and "id" in x]) == 6  # 首 3 + 尾 3
-    markers = [x for x in data if isinstance(x, dict) and "_headroom_omitted" in x]
-    assert markers and markers[0]["_headroom_omitted"] == 94
+    markers = [x for x in data if isinstance(x, dict) and x.get("_headroom", {}).get("kind") == "array_sample"]
+    assert markers and markers[0]["_headroom"]["omitted"] == 94
 
 
 def test_homogeneous_list_schema():
     out = JsonCompressor(sample_items=2).compress(BIG_LIST)
     data = json.loads(out)
-    schema = next(x for x in data if "_headroom_schema" in x)
-    assert set(schema["_headroom_schema"]["shared"]) == {"status"}
-    assert set(schema["_headroom_schema"]["varying_keys"]) == {"id", "name", "score"}
+    schema = next(x for x in data if x.get("_headroom", {}).get("kind") == "object_schema")
+    assert set(schema["_headroom"]["schema"]["shared"]) == {"status"}
+    assert set(schema["_headroom"]["schema"]["varying_keys"]) == {"id", "name", "score"}
 
 
 def test_nested_object_compressed():
