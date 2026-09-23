@@ -271,7 +271,28 @@ headroom mcp
 headroom compress app.log --json
 headroom retrieve <ccr_id> --offset 0 --limit 1000 --json
 headroom stats --json
+
+# 无损 TXT 日志转 JSON（不压缩、不写 CCR）
+headroom convert app.log --from txt --to json > app.jsonl
+headroom convert app.log --from txt --to json --format array > app.json
+headroom convert - --from txt --to json --encoding latin-1
 ```
+
+### TXT 日志转换为 JSON
+
+`convert` 子命令是无损日志解析：不执行 Headroom 压缩，不创建 CCR 条目，也不影响压缩统计。默认输出 JSONL（每行一个 JSON 对象，适合大日志流式处理）；需要单个 JSON 值时使用 `--format array`。
+
+```bash
+headroom convert app.log --from txt --to json > app.jsonl
+headroom convert app.log --from txt --to json --format array > app.json
+headroom convert - --from txt --to json --encoding latin-1
+```
+
+可用参数：`--format {jsonl,array}`（默认 `jsonl`）、`--encoding`（遵循 CLI 配置文件，缺省 `utf-8`）、`--output`（默认 stdout）、`--no-raw`（省略原始文本以减小输出）。
+
+解析出的日志对象字段为 `type`、`timestamp`、`level`、`process_id`、`service`、`thread_id`、`source_file`、`source_line`、`message`、`continuation`、`line_start`、`line_end` 和 `raw`。时间戳保留原始字符串，不猜测日期或时区；多行内容（堆栈、缩进诊断块）归入前一记录的 `continuation`；无法安全解析的标题和损坏行输出为 `type: "unparsed"`，绝不静默丢失。
+
+注意：`convert` 的输出是日志记录本身，不是 `compress --json` 的响应 envelope；两者语义不同。
 
 CLI 默认严格按 UTF-8 读取输入。若日志来自单字节编码或包含无法按 UTF-8 解码的历史字节，可显式指定编码，例如：
 
@@ -363,6 +384,7 @@ headroom/
 ├── compressors/   # log / json / code(Python) / text
 ├── ccr/           # SQLiteStore / marker
 ├── integrations/  # MCP Server
+├── log_conversion.py  # 无损 TXT 日志 → JSON/JSONL 解析
 └── cli.py
 ```
 

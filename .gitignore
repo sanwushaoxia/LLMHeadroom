@@ -14,6 +14,8 @@ __pycache__/
 *.log
 *.log.*
 *.txt
+*.json
+*.compressed
 
 # Headroom 本地数据
 # .headroom/

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -21,12 +22,56 @@ def big_log_file(tmp_path):
     return path
 
 
-def test_compress_json_and_hint(big_log_file, capsys):
-    assert main(["compress", str(big_log_file), "--hint", "log", "--json"]) == 0
+def test_convert_jsonl_and_array(tmp_path, capsys):
+    path = tmp_path / "app.txt"
+    path.write_text("12:00:00 INFO app.cc:7 hello\n", encoding="utf-8")
+
+    assert main(["convert", str(path), "--from", "txt", "--to", "json"]) == 0
+    jsonl = capsys.readouterr().out
+    assert json.loads(jsonl)["type"] == "log"
+
+    assert main(["convert", str(path), "--format", "array"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["compressor"] == "log"
-    assert payload["hint"] == "log"
+    assert payload[0]["source_file"] == "app.cc"
+
+
+def test_convert_stdin_and_output_file(tmp_path, capsys, monkeypatch):
+    source = "12:00:00 INFO stdin.cc:1 消息\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO(source))
+    output = tmp_path / "converted.jsonl"
+    assert main(["convert", "-", "--output", str(output), "--no-raw"]) == 0
+    assert capsys.readouterr().out == ""
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["message"] == "消息"
+    assert "raw" not in payload
+
+
+def test_convert_uses_config_encoding(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "latin1.txt"
+    path.write_bytes(b"12:00:00 INFO app.cc:1 byte=\xf2\n")
+    config = write_config(tmp_path, {"encoding": "latin-1"})
+    monkeypatch.setenv("HEADROOM_CONFIG", str(config))
+    assert main(["convert", str(path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "byte=\u00f2" in payload["message"]
+
+
+def test_convert_decode_error_has_stable_code(tmp_path, capsys):
+    path = tmp_path / "invalid.txt"
+    path.write_bytes(b"12:00:00 INFO app.cc:1 byte=\xf2\n")
+    assert main(["convert", str(path)]) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"]["code"] == "INPUT_DECODE_ERROR"
+
+
+def test_convert_does_not_change_compression_stats(tmp_path, capsys):
+    path = tmp_path / "app.txt"
+    path.write_text("12:00:00 INFO app.cc:1 hello\n", encoding="utf-8")
+    assert main(["convert", str(path)]) == 0
+    capsys.readouterr()
+    assert main(["stats", "--json"]) == 0
+    stats = json.loads(capsys.readouterr().out)
+    assert stats["calls"] == 0
 
 
 def test_retrieve_json_page(big_log_file, capsys):

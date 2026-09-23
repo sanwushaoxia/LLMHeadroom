@@ -12,8 +12,14 @@ _TS = (
     r"|\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]"
     r"|\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
 )
+# glog: 单字母严重级别紧跟紧凑日期，如 I20260922 13:29:51.721504
+_GLOG_TS = r"[IWEF]\d{8} \d{2}:\d{2}:\d{2}(?:\.\d+)?"
+_GLOG_SEVERITY = {"I": "INFO", "W": "WARNING", "E": "ERROR", "F": "FATAL"}
 _LEVEL = r"(?:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|CRITICAL|FATAL|SEVERE)"
-_LOG_LINE = re.compile(rf"^(?:{_TS})\s+\S+.*|.*\b{_LEVEL}\b\s*[:\-|]", re.IGNORECASE)
+_LOG_LINE = re.compile(
+    rf"^(?:{_TS})\s+\S+.*|.*\b{_LEVEL}\b\s*[:\-|]|^{_GLOG_TS}\s+\S+.*",
+    re.IGNORECASE,
+)
 _LEVEL_ORDER = {
     "TRACE": 0,
     "DEBUG": 1,
@@ -47,6 +53,10 @@ def _extract_level(line: str) -> str | None:
     structured = _STRUCTURED_LEVEL.search(line)
     if structured:
         return structured.group("level").upper()
+    # glog 风格：行首单字母严重级别紧跟紧凑日期（I20260922 ...）。
+    glog = re.match(r"^\s*([IWEF])\d{8} ", line[:20])
+    if glog:
+        return _GLOG_SEVERITY[glog.group(1)]
     # Only inspect the first ~100 chars and require a log-like prefix. This prevents
     # a message such as "request body contains ERROR" from becoming the level.
     prefix = line[:100]
@@ -88,8 +98,20 @@ class LogCompressor(Compressor):
         lines = content.splitlines()
         if len(lines) < 5:
             return 0.0
-        hits = sum(1 for line in lines[:200] if _LOG_LINE.match(line) or _extract_level(line))
-        return min(1.0, hits / min(len(lines), 200) * 1.3)
+        sample = lines[:200]
+        sample_len = min(len(lines), 200)
+        # 多行日志记录的续行（如 glog 打印的配置转储）不是记录头，
+        # 但仍属于日志正文；按最近一条记录头延伸，计入命中率。
+        hits = 0
+        continuation = 0
+        for line in sample:
+            if _LOG_LINE.match(line) or _extract_level(line):
+                hits += 1
+                continuation = min(continuation + 1, 5)
+            elif continuation:
+                hits += 1
+                continuation -= 1
+        return min(1.0, hits / sample_len * 1.3)
 
     def compress_with_metadata(self, content: str) -> CompressionOutput:
         lines = content.splitlines()
